@@ -1,0 +1,247 @@
+# DevCollab Cloud Build CI/CD Pipeline
+steps:
+  # ── Install & Test: Backend Services ──────────────────────────────────────
+
+  - id: install-shared
+    name: python:3.12-slim
+    entrypoint: pip
+    args: [install, -r, backend/services/api-gateway/requirements.txt, --quiet]
+
+  - id: test-api-gateway
+    name: python:3.12-slim
+    entrypoint: bash
+    args:
+      - -c
+      - |
+        pip install -r backend/services/api-gateway/requirements.txt --quiet
+        cd backend && PYTHONPATH=. pytest services/api-gateway/tests/ -v --tb=short
+    waitFor: [install-shared]
+
+  - id: test-task-service
+    name: python:3.12-slim
+    entrypoint: bash
+    args:
+      - -c
+      - |
+        pip install -r backend/services/task-service/requirements.txt --quiet
+        cd backend && PYTHONPATH=. pytest services/task-service/tests/ -v --tb=short
+    waitFor: [install-shared]
+
+  - id: test-messaging-service
+    name: python:3.12-slim
+    entrypoint: bash
+    args:
+      - -c
+      - |
+        pip install -r backend/services/messaging-service/requirements.txt --quiet
+        cd backend && PYTHONPATH=. pytest services/messaging-service/tests/ -v --tb=short
+    waitFor: [install-shared]
+
+  - id: test-notification-worker
+    name: python:3.12-slim
+    entrypoint: bash
+    args:
+      - -c
+      - |
+        pip install -r backend/services/notification-worker/requirements.txt --quiet
+        cd backend && PYTHONPATH=. pytest services/notification-worker/tests/ -v --tb=short
+    waitFor: [install-shared]
+
+  # ── Install & Test: Frontend ───────────────────────────────────────────────
+
+  - id: frontend-install
+    name: node:20-alpine
+    entrypoint: npm
+    args: [ci, --prefix, frontend]
+
+  - id: frontend-test
+    name: node:20-alpine
+    entrypoint: npm
+    args: [run, --prefix, frontend, test]
+    waitFor: [frontend-install]
+
+  - id: frontend-build
+    name: node:20-alpine
+    entrypoint: npm
+    args: [run, --prefix, frontend, build]
+    waitFor: [frontend-test]
+
+  # ── Build Docker Images (parallel) ────────────────────────────────────────
+
+  - id: build-api-gateway
+    name: gcr.io/cloud-builders/docker
+    args:
+      - build
+      - -t
+      - ${_REGION}-docker.pkg.dev/${PROJECT_ID}/devcollab/api-gateway:${SHORT_SHA}
+      - -t
+      - ${_REGION}-docker.pkg.dev/${PROJECT_ID}/devcollab/api-gateway:latest
+      - -f
+      - backend/services/api-gateway/Dockerfile
+      - backend/
+    waitFor: [test-api-gateway]
+
+  - id: build-task-service
+    name: gcr.io/cloud-builders/docker
+    args:
+      - build
+      - -t
+      - ${_REGION}-docker.pkg.dev/${PROJECT_ID}/devcollab/task-service:${SHORT_SHA}
+      - -t
+      - ${_REGION}-docker.pkg.dev/${PROJECT_ID}/devcollab/task-service:latest
+      - -f
+      - backend/services/task-service/Dockerfile
+      - backend/
+    waitFor: [test-task-service]
+
+  - id: build-messaging-service
+    name: gcr.io/cloud-builders/docker
+    args:
+      - build
+      - -t
+      - ${_REGION}-docker.pkg.dev/${PROJECT_ID}/devcollab/messaging-service:${SHORT_SHA}
+      - -t
+      - ${_REGION}-docker.pkg.dev/${PROJECT_ID}/devcollab/messaging-service:latest
+      - -f
+      - backend/services/messaging-service/Dockerfile
+      - backend/
+    waitFor: [test-messaging-service]
+
+  - id: build-notification-worker
+    name: gcr.io/cloud-builders/docker
+    args:
+      - build
+      - -t
+      - ${_REGION}-docker.pkg.dev/${PROJECT_ID}/devcollab/notification-worker:${SHORT_SHA}
+      - -t
+      - ${_REGION}-docker.pkg.dev/${PROJECT_ID}/devcollab/notification-worker:latest
+      - -f
+      - backend/services/notification-worker/Dockerfile
+      - backend/
+    waitFor: [test-notification-worker]
+
+  - id: build-frontend
+    name: gcr.io/cloud-builders/docker
+    args:
+      - build
+      - -t
+      - ${_REGION}-docker.pkg.dev/${PROJECT_ID}/devcollab/frontend:${SHORT_SHA}
+      - -t
+      - ${_REGION}-docker.pkg.dev/${PROJECT_ID}/devcollab/frontend:latest
+      - frontend/
+    waitFor: [frontend-build]
+
+  # ── Security Scan ─────────────────────────────────────────────────────────
+
+  - id: trivy-scan-api-gateway
+    name: aquasec/trivy:latest
+    args:
+      - image
+      - --exit-code=1
+      - --severity=CRITICAL
+      - --no-progress
+      - ${_REGION}-docker.pkg.dev/${PROJECT_ID}/devcollab/api-gateway:${SHORT_SHA}
+    waitFor: [build-api-gateway]
+
+  # ── Push Images ───────────────────────────────────────────────────────────
+
+  - id: push-images
+    name: gcr.io/cloud-builders/docker
+    entrypoint: bash
+    args:
+      - -c
+      - |
+        docker push ${_REGION}-docker.pkg.dev/${PROJECT_ID}/devcollab/api-gateway:${SHORT_SHA}
+        docker push ${_REGION}-docker.pkg.dev/${PROJECT_ID}/devcollab/api-gateway:latest
+        docker push ${_REGION}-docker.pkg.dev/${PROJECT_ID}/devcollab/task-service:${SHORT_SHA}
+        docker push ${_REGION}-docker.pkg.dev/${PROJECT_ID}/devcollab/task-service:latest
+        docker push ${_REGION}-docker.pkg.dev/${PROJECT_ID}/devcollab/messaging-service:${SHORT_SHA}
+        docker push ${_REGION}-docker.pkg.dev/${PROJECT_ID}/devcollab/messaging-service:latest
+        docker push ${_REGION}-docker.pkg.dev/${PROJECT_ID}/devcollab/notification-worker:${SHORT_SHA}
+        docker push ${_REGION}-docker.pkg.dev/${PROJECT_ID}/devcollab/notification-worker:latest
+        docker push ${_REGION}-docker.pkg.dev/${PROJECT_ID}/devcollab/frontend:${SHORT_SHA}
+        docker push ${_REGION}-docker.pkg.dev/${PROJECT_ID}/devcollab/frontend:latest
+    waitFor: [build-api-gateway, build-task-service, build-messaging-service, build-notification-worker, build-frontend, trivy-scan-api-gateway]
+
+  # ── Deploy to Cloud Run (blue/green) ─────────────────────────────────────
+
+  - id: deploy-api-gateway
+    name: gcr.io/google.com/cloudsdktool/cloud-sdk:slim
+    entrypoint: gcloud
+    args:
+      - run
+      - deploy
+      - devcollab-api-gateway
+      - --image=${_REGION}-docker.pkg.dev/${PROJECT_ID}/devcollab/api-gateway:${SHORT_SHA}
+      - --region=${_REGION}
+      - --platform=managed
+      - --no-traffic
+      - --tag=sha-${SHORT_SHA}
+    waitFor: [push-images]
+
+  - id: deploy-task-service
+    name: gcr.io/google.com/cloudsdktool/cloud-sdk:slim
+    entrypoint: gcloud
+    args:
+      - run
+      - deploy
+      - devcollab-task-service
+      - --image=${_REGION}-docker.pkg.dev/${PROJECT_ID}/devcollab/task-service:${SHORT_SHA}
+      - --region=${_REGION}
+      - --platform=managed
+      - --no-traffic
+      - --tag=sha-${SHORT_SHA}
+    waitFor: [push-images]
+
+  - id: deploy-messaging-service
+    name: gcr.io/google.com/cloudsdktool/cloud-sdk:slim
+    entrypoint: gcloud
+    args:
+      - run
+      - deploy
+      - devcollab-messaging-service
+      - --image=${_REGION}-docker.pkg.dev/${PROJECT_ID}/devcollab/messaging-service:${SHORT_SHA}
+      - --region=${_REGION}
+      - --platform=managed
+      - --no-traffic
+      - --tag=sha-${SHORT_SHA}
+    waitFor: [push-images]
+
+  - id: deploy-notification-worker
+    name: gcr.io/google.com/cloudsdktool/cloud-sdk:slim
+    entrypoint: gcloud
+    args:
+      - run
+      - deploy
+      - devcollab-notification-worker
+      - --image=${_REGION}-docker.pkg.dev/${PROJECT_ID}/devcollab/notification-worker:${SHORT_SHA}
+      - --region=${_REGION}
+      - --platform=managed
+      - --no-traffic
+      - --tag=sha-${SHORT_SHA}
+    waitFor: [push-images]
+
+  # ── Migrate Traffic (after deploy) ────────────────────────────────────────
+
+  - id: migrate-traffic
+    name: gcr.io/google.com/cloudsdktool/cloud-sdk:slim
+    entrypoint: bash
+    args:
+      - -c
+      - |
+        for svc in devcollab-api-gateway devcollab-task-service devcollab-messaging-service devcollab-notification-worker; do
+          gcloud run services update-traffic $svc \
+            --to-tags=sha-${SHORT_SHA}=100 \
+            --region=${_REGION}
+        done
+    waitFor: [deploy-api-gateway, deploy-task-service, deploy-messaging-service, deploy-notification-worker]
+
+substitutions:
+  _REGION: asia-south1
+
+options:
+  logging: CLOUD_LOGGING_ONLY
+  machineType: E2_HIGHCPU_8
+  dynamic_substitutions: true
+
+timeout: 1800s

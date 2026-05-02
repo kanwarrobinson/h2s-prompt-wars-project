@@ -1,0 +1,179 @@
+version: "3.9"
+
+services:
+  # ── Infrastructure ──────────────────────────────────────────────────────
+
+  mongo:
+    image: mongo:7
+    restart: unless-stopped
+    ports:
+      - "27017:27017"
+    volumes:
+      - mongo_data:/data/db
+      - mongo_config:/data/configdb
+    environment:
+      MONGO_INITDB_DATABASE: devcollab
+    healthcheck:
+      test: ["CMD", "mongosh", "--eval", "db.adminCommand('ping')"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+    networks:
+      - devcollab
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    command: redis-server --appendonly yes --maxmemory 256mb --maxmemory-policy allkeys-lru
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+    networks:
+      - devcollab
+
+  # ── Backend Services ────────────────────────────────────────────────────
+
+  api-gateway:
+    build:
+      context: ./backend
+      dockerfile: services/api-gateway/Dockerfile
+    restart: unless-stopped
+    ports:
+      - "8001:8080"
+    environment:
+      ENVIRONMENT: development
+      MONGODB_URI: mongodb://mongo:27017/devcollab
+      REDIS_HOST: redis
+      REDIS_PORT: "6379"
+      GCP_PROJECT_ID: devcollab-local
+      ALLOWED_ORIGINS: '["http://localhost:5173"]'
+      SECRET_MANAGER_ENABLED: "false"
+    depends_on:
+      mongo:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+    networks:
+      - devcollab
+
+  task-service:
+    build:
+      context: ./backend
+      dockerfile: services/task-service/Dockerfile
+    restart: unless-stopped
+    ports:
+      - "8002:8080"
+    environment:
+      ENVIRONMENT: development
+      MONGODB_URI: mongodb://mongo:27017/devcollab
+      REDIS_HOST: redis
+      REDIS_PORT: "6379"
+      GCP_PROJECT_ID: devcollab-local
+      SECRET_MANAGER_ENABLED: "false"
+    depends_on:
+      mongo:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+    networks:
+      - devcollab
+
+  messaging-service:
+    build:
+      context: ./backend
+      dockerfile: services/messaging-service/Dockerfile
+    restart: unless-stopped
+    ports:
+      - "8003:8080"
+    environment:
+      ENVIRONMENT: development
+      MONGODB_URI: mongodb://mongo:27017/devcollab
+      REDIS_HOST: redis
+      REDIS_PORT: "6379"
+      GCP_PROJECT_ID: devcollab-local
+      SECRET_MANAGER_ENABLED: "false"
+    depends_on:
+      mongo:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+    networks:
+      - devcollab
+
+  notification-worker:
+    build:
+      context: ./backend
+      dockerfile: services/notification-worker/Dockerfile
+    restart: unless-stopped
+    ports:
+      - "8004:8080"
+    environment:
+      ENVIRONMENT: development
+      GCP_PROJECT_ID: devcollab-local
+      SECRET_MANAGER_ENABLED: "false"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+    networks:
+      - devcollab
+
+  # ── Frontend ────────────────────────────────────────────────────────────
+
+  frontend:
+    build:
+      context: ./frontend
+      target: builder
+    restart: unless-stopped
+    ports:
+      - "5173:5173"
+    environment:
+      VITE_API_URL: http://localhost:8001
+      VITE_WS_URL: ws://localhost:8003
+    volumes:
+      - ./frontend/src:/app/src
+      - ./frontend/public:/app/public
+    command: npm run dev -- --host 0.0.0.0
+    depends_on:
+      api-gateway:
+        condition: service_healthy
+      task-service:
+        condition: service_healthy
+    networks:
+      - devcollab
+
+volumes:
+  mongo_data:
+  mongo_config:
+  redis_data:
+
+networks:
+  devcollab:
+    driver: bridge
